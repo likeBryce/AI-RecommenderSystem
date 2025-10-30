@@ -4,14 +4,15 @@ from tensorflow.keras.layers import Layer, BatchNormalization, Dense, Input, PRe
 from tensorflow.keras import Model
 from tensorflow.keras.regularizers import l2
 
-class Attention_layer(Layer):
+class Attention_layer(Layer): # 自定义层（Layers）
     """
     自定义Attention层， 这个就是一个全连接神经网络
     """
     def __init__(self, att_hidden_units, activation='sigmoid'):
         super(Attention_layer, self).__init__()
-        self.att_dense = [Dense(unit, activation=activation) for unit in att_hidden_units]
-        self.att_final_dense = Dense(1)
+        # Dense(input, activation) 创建input个神经元的全连接层, 激活函数采用sigmoid
+        self.att_dense = [Dense(unit, activation=activation) for unit in att_hidden_units] 
+        self.att_final_dense = Dense(1) #单神经元的全连接层，无激活函数（默认线性激活）, 将前面多层变换后的特征映射为一个标量分数（注意力分数）
     
     # forward
     def call(self, inputs):
@@ -20,30 +21,50 @@ class Attention_layer(Layer):
         
         item_embed: 这个是候选商品的embedding向量   维度是(None, embedding_dim * behavior_num)   # behavior_num能表示用户行为的特征个数 这里是1， 所以(None, embed_dim)
         seq_embed: 这个是用户历史商品序列的embedding向量， 维度是(None, max_len, embedding_dim * behavior_num)  (None, max_len, embed_dim)
-        mask:  维度是(None, max_len)   这个里面每一行是[False, False, True, True, ....]的形式， False的长度表示样本填充的那部分
+        mask:  维度是(None, max_len) 这个里面每一行是[False, False, True, True, ....]的形式， False的长度表示样本填充的那部分
         """
-        q, k, v, key_masks = inputs
+
+        # (query): 目标物品嵌入，形状为 (batch_size, embed_dim)
+        # (key): 用户历史行为序列，形状为 (batch_size, max_len, embed_dim)
+        # (value): 用户历史行为序列（与key相同），形状为 (batch_size, max_len, embed_dim)
+        # key_masks: 序列掩码，形状为 (batch_size, max_len)，False表示填充位置
+        q, k, v, key_masks = inputs 
+        # tf.tile: 将目标商品嵌入复制max_len次 
+        # 输入：(batch_size, embed_dim) → 输出：(batch_size, max_len * embed_dim)
         q = tf.tile(q, multiples=[1, k.shape[1]])   # (None, max_len*embedding)       # 沿着k.shap[1]的维度复制  毕竟每个历史行为都要和当前的商品计算相似关系
-        q = tf.reshape(q, shape=[-1, k.shape[1], k.shape[2]])      # (None, max_len, emebdding_dim
+        # tf.reshape: 重新塑形，使每个时间步都有一个目标商品嵌入, 让目标商品与历史序列中的每个商品都能计算注意力
+        q = tf.reshape(q, shape=[-1, k.shape[1], k.shape[2]])      # (None, max_len, emebdding_dim)
         
         # q, k, out product should concat
+        # 构建交互特征: 拼接四种交互信息：目标商品特征、历史商品特征、特征差异（捕捉距离关系）、特征乘积（捕捉交互关系）
         info = tf.concat([q, k, q-k, q*k], axis=-1)   # (None, max_len, 4*emebdding_dim)
         
         # n层全连接
         for dense in self.att_dense:
             info = dense(info)
-        
+    
         outputs = self.att_final_dense(info)      # (None,  max_len, 1)
         outputs = tf.squeeze(outputs, axis=-1)    # (None, max_len)
         
         # mask 把每个行为序列填充的那部分替换成很小的一个值
+        # 在TensorFlow中，tf.ones_like函数是一个非常有用的工具，
+        # 它允许开发者创建一个与给定张量（tensor）具有相同形状（shape）的新张量，而这个新张量的所有元素都被设置为1。
+        # paddings 创建与outputs相同形状的极小值矩阵
+        # 将填充位置（mask=0）的分数替换为极小值, 确保填充位置在softmax后概率接近0
         paddings = tf.ones_like(outputs) * (-2**32+1)      # (None, max_len)  这个就是之前填充的那个地方， 我们补一个很小的值
+
+        # 比较 key_masks 中的每个元素是否等于 0，返回True和False
+        # tf.where(condition, x, y): 当condition满足时, 用x填充y
+        # 实际意义:
+        # 真实行为（掩码=1）：保留原始注意力分数，参与用户兴趣计算
+        # 填充行为（掩码=0）：被替换为极小值，在最终加权求和中贡献为0
         outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)
         
-        # softmax
+        # softmax: 将注意力分数转换为概率分布
         outputs = tf.nn.softmax(logits=outputs) # (None, max_len)
+        # 增加维度用于矩阵乘法
+        # tf.expand_dims函数是用于增加张量的维度。这个操作在指定的axis索引处为输入张量output插入一个维度。如果axis是负数，则维度插入在从末尾开始计算的位置。
         outputs = tf.expand_dims(outputs, axis=1)   # (None, 1, max_len) 
-        
         outputs = tf.matmul(outputs, v)   # 三维矩阵相乘， 相乘发生在后两维   (None, 1, max_len) * (None, max_len, embed_dim) = (None, 1, embed_dim)
         outputs = tf.squeeze(outputs, axis=1)  # (None, embed_dim)
         
@@ -53,15 +74,23 @@ class Attention_layer(Layer):
 class Dice(Layer):
     def __init__(self):
         super(Dice, self).__init__()
+        # 创建一个批归一化层, 不学习均值偏移参数（β）, 不学习缩放参数（γ）
         self.bn = BatchNormalization(center=False, scale=False)
+        # 创建了一个可学习的标量参数: 控制数据动态通过激活函数的比例
+        # self.add_weight 是一个常用于自定义层（Layers）中创建权重（weights）的方法。
+        # # 形状：空元组表示标量（0维张量）
+        # # 数据类型：32位浮点数
+        # # 参数名称：在模型中标识这个参数
         self.alpha = self.add_weight(shape=(), dtype=tf.float32, name='alpha')
     
     def call(self, x):
-        x_normed = self.bn(x)
-        x_p = tf.sigmoid(x_normed)
+        x_normed = self.bn(x) # 对输入x进行批归一化（只标准化，不缩放平移）
+        # 将标准化后的值通过sigmoid函数, x_p可以看作是每个神经元的"激活概率"
+        x_p = tf.sigmoid(x_normed) # x_p = 1.0 / (1.0 + tf.exp(-x_normed))
         
+        # 这是Dice激活函数的核心公式: Dice的关键思想是：根据输入数据的分布动态决定每个神经元的激活程度
         return self.alpha * (1.0-x_p) * x + x_p * x
-
+        
 class DIN(Model):
     def __init__(self, feature_columns, behavior_feature_list, att_hidden_units=(80, 40), ffn_hidden_units=(80, 40), att_activation='sigmoid', 
                  ffn_activation='prelu', maxlen=40, dnn_dropout=0., embed_reg=1e-4):
@@ -87,14 +116,25 @@ class DIN(Model):
         self.dense_len = len(self.dense_feature_columns)    
         self.behavior_num = len(behavior_feature_list)
         
+        # 为非行为的稀疏特征创建嵌入层
+        # 这两段代码创建了两种不同类型的嵌入层，分别处理不同性质的特征：
+        # 1. 普通稀疏特征嵌入层
+        # 处理的特征类型：用户静态特征：性别、年龄、地域等; 上下文特征：时间、设备、位置等; 商品静态特征：品牌、价格区间等
+        # 这些特征不参与注意力计算, 直接拼接后进入深度网络, 代表用户的长期稳定兴趣
+        # 2. 行为序列特征嵌入层
+        # 处理的特征类型：用户历史行为：点击的商品ID、店铺ID、品类ID等, 当前目标商品：候选商品ID、店铺ID、品类ID等
+        # 这些特征参与注意力计算, 用于建模用户的动态短期兴趣, 是DIN模型的核心创新所在
+
         # embedding层， 这里分为两部分的embedding， 第一部分是普通的离散特征， 第二部分是能表示用户历史行为的离散特征， 这一块后面要进注意力和当前的商品计算相关性
-        self.embed_sparse_layers = [Embedding(input_dim=feat['feat_num'], 
-                                              input_length=1, 
-                                              output_dim=feat['embed_dim'],
-                                              embeddings_initializer='random_uniform',
-                                              embeddings_regularizer=l2(embed_reg)
+        self.embed_sparse_layers = [Embedding(input_dim=feat['feat_num'],  # 特征的不同取值数量（vocabulary size）
+                                              input_length=1,  # 每个样本输入长度为1（非序列数据）
+                                              output_dim=feat['embed_dim'], # 嵌入向量的维度
+                                              embeddings_initializer='random_uniform', # 权重初始化方式
+                                              embeddings_regularizer=l2(embed_reg) # L2正则化，防止过拟合
                                              ) for feat in self.sparse_feature_columns if feat['feat'] not in behavior_feature_list]
         # behavior embedding layers, item id and catetory id
+        
+        # 为行为序列特征创建嵌入层
         self.embed_seq_layers = [Embedding(input_dim=feat['feat_num'], 
                                            input_length=1, 
                                            output_dim=feat['embed_dim'], 
@@ -105,17 +145,16 @@ class DIN(Model):
         # 注意力机制
         self.attention_layer = Attention_layer(att_hidden_units, att_activation)
         
-        self.bn = BatchNormalization(trainable=True)
+        self.bn = BatchNormalization(trainable=True) # 层的参数在训练过程中更新
         
         # 全连接网络
         self.ffn = [Dense(unit, activation=PReLU() if ffn_activation=='prelu' else Dice()) for unit in ffn_hidden_units]
-        self.dropout = Dropout(dnn_dropout)
+        self.dropout = Dropout(dnn_dropout) # dnn_dropout:失活率
         self.dense_final = Dense(1)
         
     def call(self, inputs):
         """
         inputs: [dense_input, sparse_input, seq_input, item_input]  ， 第二部分是离散型的特征输入， 第三部分是用户的历史行为， 第四部分是当前商品的输入
-    
         dense_input： 连续型的特征输入， 维度是(None, dense_len)
         sparse_input: 离散型的特征输入， 维度是(None, other_sparse_len)
         seq_inputs: 用户的历史行为序列(None, maxlen, behavior_len)
@@ -125,15 +164,26 @@ class DIN(Model):
         dense_inputs, sparse_inputs, seq_inputs, item_inputs = inputs
         
         # attention --->mask, if the element of seq_inputs is equal 0, it must be filled in  这是因为很多序列由于不够长用0进行了填充,并且是前面补的0
+        # 这里的mask的作用就是把填充的那部分值都给标记了出来， 后面注意力层计算的时候要把这些值给排除掉
+        """
+        seq_inputs[:, :, 0]: 取序列的第一个行为特征（通常是item_id）
+        tf.not_equal(seq_inputs[:, :, 0], 0): 判断每个位置是否不等于0（0表示填充）
+        tf.cast(..., dtype=tf.float32): 将布尔值转换为浮点数（True→1.0, False→0.0）
+        结果：mask形状为(batch_size, maxlen)，真实行为位置为1，填充位置为0
+        """
         mask = tf.cast(tf.not_equal(seq_inputs[:, :, 0], 0), dtype=tf.float32)  # (None, maxlen)  类型转换函数， 把seq_input中不等于0的值转成float32
         # 这个函数的作用就是每一行样本中， 不为0的值返回1， 为0的值返回0， 这样就把填充的那部分值都给标记了出来
         
-        # 下面把连续型特征和行为无关的离散型特征拼到一块先
+        # 将稠密特征和普通稀疏特征的嵌入向量逐步拼接，构建一个综合的上下文特征表示。
         other_info = dense_inputs   # (None, dense_len)
+        # sparse_inputs[:, i]切片操作，取所有样本的第i个稀疏特征
+        # self.embed_sparse_layers[i](sparse_inputs[:, i]), # 嵌入层将离散索引转换为稠密向量
         for i in range(self.other_sparse_len):
             other_info = tf.concat([other_info, self.embed_sparse_layers[i](sparse_inputs[:, i])], axis=-1)      # (None, dense_len+other_sparse_len)
         
         # 下面把候选的商品和用户历史行为商品也各自的拼接起来
+        # 序列嵌入：
+
         seq_embed = tf.concat([self.embed_seq_layers[i](seq_inputs[:, :, i]) for i in range(self.behavior_num)], axis=-1)   # [None, max_len, embed_dim]
         item_embed = tf.concat([self.embed_seq_layers[i](item_inputs[:, i]) for i in range(self.behavior_num)], axis=-1)  # [None, embed_dim]
         
@@ -147,12 +197,14 @@ class DIN(Model):
         else:
             info_all = tf.concat([user_info, item_embed], axis=-1) # (None, embed_dim+embed_dim)
         
+        # 为什么放在最前面？ 稳定输入分布：将拼接后的特征标准化， 经过BN后：所有特征 ~ N(0, 1), 避免大范围特征主导梯度更新
         info_all = self.bn(info_all)
         
         # ffn
         for dense in self.ffn:
             info_all = dense(info_all)
         
+        # 为什么放在全连接层之后？ 训练阶段：随机丢弃神经元，防止过拟合, 测试阶段：使用所有神经元，但按比例缩放
         info_all = self.dropout(info_all)
         outputs = tf.nn.sigmoid(self.dense_final(info_all))
         return outputs

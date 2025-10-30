@@ -24,7 +24,7 @@ def denseFeature(feat):
 	: return
 	"""
 	return {'feat': feat}
-
+	
 def create_amazon_electronic_dataset(file, embed_dim=8, maxlen=40):
 	"""
 	:param file: dataset path
