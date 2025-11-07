@@ -9,13 +9,17 @@ from collections import OrderedDict
 
 from deepctr.feature_column import SparseFeat, VarLenSparseFeat, DenseFeat
 
-
 def build_input_layers(feature_columns, prefix=''):
+    """
+    Input 是 TensorFlow/Keras 中用于定义模型输入层的类。
+    input_layer = Input(shape=shape, name=None, dtype=None, **kwargs)
+    """
+    # # input_features = OrderedDict() 这行代码创建了一个有序字典来存储输入特征。
     input_features = OrderedDict()
     for fc in feature_columns:
         if isinstance(fc, SparseFeat):
             input_features[fc.name] = Input(
-                shape=(1,), name=prefix + fc.name, dtype=fc.dtype)
+                shape=(1,), name=prefix + fc.name, dtype=fc.dtype) # 批量大小 × 1（单个ID）
         elif isinstance(fc, DenseFeat):
             input_features[fc.name] = Input(
                 shape=(fc.dimension,), name=prefix + fc.name, dtype=fc.dtype)
@@ -34,13 +38,37 @@ def build_input_layers(feature_columns, prefix=''):
     return input_features
 
 def build_embedding_layers(feature_columns):
+    """
+    Embedding 层的作用是将高维稀疏的类别ID转换为低维稠密的向量表示。
+    Embedding(
+    input_dim,      # 词汇表大小（最大整数索引 + 1）
+    output_dim,     # 嵌入向量的维度
+    input_length=None,  # 输入序列长度（对于序列输入）
+    embeddings_initializer='uniform',
+    mask_zero=False,     # 是否忽略0值（用于变长序列）
+    name=None)
+    """
     embedding_layer_dict = {}
-
+    
     for fc in feature_columns:
         if isinstance(fc, SparseFeat):
             embedding_layer_dict[fc.name] = Embedding(fc.vocabulary_size, fc.embedding_dim, name='emb_' + fc.name)
         elif isinstance(fc, VarLenSparseFeat):
+            # 这行代码中的 fc.vocabulary_size + 1 和 mask_zero=True 是处理稀疏特征时的两个重要技巧。
             # 这里加1是因为mask有个默认的embedding，占用了一个位置，比如mask为0， 而0这个位置的embedding是mask专用了
+            """
+            # 假设用户ID特征
+            fc.vocabulary_size = 1000  # 训练集中有1000个不同的用户
+            embedding = Embedding(1000 + 1, 16)  # 实际创建1001个嵌入向量
+
+            # 索引分配：
+            # 0: [MASK] 或 [PAD]  (mask_zero=True时用于填充)
+            # 1: 用户1
+            # 2: 用户2
+            # ...
+            # 1000: 用户1000
+            # 如果有新用户，可以映射到索引0或其他预留位置
+            """
             embedding_layer_dict[fc.name] = Embedding(fc.vocabulary_size + 1, fc.embedding_dim, name='emb_' + fc.name, mask_zero=True)
 
     return embedding_layer_dict
@@ -74,22 +102,29 @@ def concat_embedding_list(feature_columns, input_layer_dict, embedding_layer_dic
     :input_layer_dict:A dict. 这是离散特征对应的层字典 {'sparse_name': Input(shap, name, dtype)}形式
     :embedding_layer_dict: A dict. 离散特征构建的embedding层字典，形式{'sparse_name': Embedding(vocabulary_size, embedding_dim, name)}
     """
-    embedding_list = []
-    for fc in feature_columns:
+    embedding_list = [] # 创建一个空列表，用于存储所有特征的嵌入向量
+    for fc in feature_columns: # fc 是特征列对象，包含特征的所有配置信息
         _input = input_layer_dict[fc.name]  # 获取输入层 
         _embed = embedding_layer_dict[fc.name]  # B x 1 x dim  获取对应的embedding层
         embed = _embed(_input)    # B x dim  将input层输入到embedding层中
+        # 这是函数式API的核心：将输入层传递给嵌入层。 输入形状：(batch_size, 1)  输出形状：(batch_size, 1, embedding_dim)
         
-        # 是否需要flatten, 如果embedding列表最终是直接输入到Dense层中，需要进行Flatten，否则不需要
+        # 是否需要flatten, 如果embedding列表最终是直接输入到Dense层中，需要进行Flatten，否则不需要(特征拼接后输入全连接网络则需要)
         if flatten:
+            # 需要Flatten的情况：(batch_size, 1, embedding_dim) → (batch_size, embedding_dim)
+            # from tensorflow.keras.layers import Flatten
+            # Flatten() 是 Keras 中的一个层，用于将多维输入展平为一维。让我详细解释它的用法和作用：
+            # 连接CNN/Embedding与Dense层, 保持batch维度不变
             embed = Flatten()(embed)
+            # 这段代码等价于：flatten_layer = Flatten() embed = flatten_layer(embed)
             
         embedding_list.append(embed)
     
     return embedding_list
 
 
-
+# NoMask层的作用是移除输入张量的掩码信息
+# 当我们需要连接多个具有不同掩码的张量时，Keras的Concatenate层会检查掩码一致性。如果掩码不一致，就会报错。NoMask层可以解决这个问题。
 class NoMask(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         super(NoMask, self).__init__(**kwargs)
@@ -102,7 +137,8 @@ class NoMask(tf.keras.layers.Layer):
     def compute_mask(self, inputs, mask):
         return None
 
-
+# 这是一个增强版的拼接函数，支持可选的掩码处理。
+# inputs: 要拼接的张量列表 axis: 拼接的维度（默认-1，即最后一个维度） mask: 是否保留掩码信息
 def concat_func(inputs, axis=-1, mask=False):
     if not mask:
         inputs = list(map(NoMask(), inputs))
@@ -238,7 +274,6 @@ def softmax(logits, dim=-1, name=None):
     except TypeError:
         return tf.nn.softmax(logits, axis=dim, name=name)
 
-
 """MMOE模型"""
 def MMOE(dnn_feature_columns, num_experts=3, expert_dnn_hidden_units=(256, 128), tower_dnn_hidden_units=(64,),
         gate_dnn_hidden_units=(), l2_reg_embedding=0.00001, l2_reg_dnn=0, dnn_dropout=0, dnn_activation='relu',
@@ -266,6 +301,7 @@ def MMOE(dnn_feature_columns, num_experts=3, expert_dnn_hidden_units=(256, 128),
     
     # 构建embedding字典
     embedding_layer_dict = build_embedding_layers(dnn_feature_columns)
+
     # 离散的这些特特征embedding之后，然后拼接，然后直接作为全连接层Dense的输入，所以需要进行Flatten
     dnn_sparse_embed_input = concat_embedding_list(sparse_feature_columns, input_layer_dict, embedding_layer_dict, flatten=False)
     
@@ -278,6 +314,9 @@ def MMOE(dnn_feature_columns, num_experts=3, expert_dnn_hidden_units=(256, 128),
         expert_network = DNN(expert_dnn_hidden_units, dnn_activation, l2_reg_dnn, dnn_dropout, dnn_use_bn, seed=2022, name='expert_'+str(i))(dnn_input)
         expert_outputs.append(expert_network)
     
+    # 将多个专家网络的输出堆叠成一个三维张量
+    # # 语法：Lambda(函数)(输入)
+    # # Lambda(lambda x: 对x进行某些操作)(input_tensor)
     expert_concat = Lambda(lambda x: tf.stack(x, axis=1))(expert_outputs)
     
     # 建立多门控机制层
@@ -289,6 +328,17 @@ def MMOE(dnn_feature_columns, num_experts=3, expert_dnn_hidden_units=(256, 128),
         gate_out = Lambda(lambda x: tf.expand_dims(x, axis=-1))(gate_out)
         
         # gate multiply the expert
+        """
+        tf.reduce_sum(
+        input_tensor,
+        axis=None,
+        keepdims=None,
+        name=None)
+        input_tensor：这是待处理的张量。
+        axis：这个参数指定了沿着哪个维度（轴）进行求和。如果不指定，则默认对所有元素进行求和。
+        keepdims：这个参数决定了求和后是否保持原张量的维度。如果设置为True，则输出的张量将保持输入张量的形状；如果设置为False或不设置（默认为False），则结果会降低维度。
+        name：这个参数允许用户为这个操作指定一个名字，这在TensorFlow的计算图中有助于识别
+        """
         gate_mul_expert = Lambda(lambda x: reduce_sum(x[0] * x[1], axis=1, keep_dims=False), name='gate_mul_expert_'+task_names[i])([expert_concat, gate_out])
         
         mmoe_outputs.append(gate_mul_expert)
