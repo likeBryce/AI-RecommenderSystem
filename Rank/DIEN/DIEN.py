@@ -315,15 +315,17 @@ def DIEN(feature_columns, behavior_feature_list, behavior_seq_feature_list, use_
     user_behavior_length = input_layer_dict["seq_length"]
     
     # 筛选出特征中的sparse_fea, dense_fea, varlen_fea
+    # filter(function, iterable) #function：用于判断的函数，返回值为布尔值（True或False） iterable：一个可迭代对象，如列表、元组、集合或字符串等。
     sparse_feature_columns = list(filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if feature_columns else []
     dense_feature_columns = list(filter(lambda x: isinstance(x, DenseFeat), feature_columns)) if feature_columns else []
     varlen_sparse_feature_columns = list(filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if feature_columns else []
     
-    history_feature_columns = []
-    neg_history_feature_columns = []
-    history_fc_names = list(map(lambda x: "hist_"+x, behavior_feature_list))
-    neg_history_fc_names = list(map(lambda x: "neg_"+x, history_fc_names))
+    history_feature_columns = [] # 存储正向历史行为特征
+    neg_history_feature_columns = [] # 存储负向历史行为特征
+    history_fc_names = list(map(lambda x: "hist_"+x, behavior_feature_list)) # 为行为特征列表添加"hist_"前缀，生成历史特征名称
+    neg_history_fc_names = list(map(lambda x: "neg_"+x, history_fc_names)) # 为历史特征名称添加"neg_"前缀，生成负样本历史特征名称
     
+    # 遍历所有变长稀疏特征列，根据特征名称进行分类
     for fc in varlen_sparse_feature_columns:
         feature_name = fc.name
         if feature_name in history_fc_names:
@@ -344,13 +346,16 @@ def DIEN(feature_columns, behavior_feature_list, behavior_seq_feature_list, use_
     
     # 因为这里最终需要将embedding拼接后直接输入到全连接层(Dense)中, 所以需要Flatten
     dnn_sparse_embed_input = concat_embedding_list(sparse_feature_columns, input_layer_dict, embedding_layer_dict, flatten=True)
+    
     # 将所有sparse特征的embedding进行拼接
     dnn_sparse_input = concat_input_list(dnn_sparse_embed_input)
     
     # 获取当前的行为特征(movie)的embedding，这里有可能有多个行为产生了行为序列，所以需要使用列表将其放在一起
     query_embed_list = embedding_lookup(behavior_feature_list, input_layer_dict, embedding_layer_dict)
+
     # 获取行为序列(movie_id序列, hist_movie_id) 对应的embedding，这里有可能有多个行为产生了行为序列，所以需要使用列表将其放在一起
     keys_embed_list = embedding_lookup(behavior_seq_feature_list, input_layer_dict, embedding_layer_dict)
+
     # 把q,k的embedding拼在一块
     query_emb, keys_emb = concat_input_list(query_embed_list), concat_input_list(keys_embed_list)
     

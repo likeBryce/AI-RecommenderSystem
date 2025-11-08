@@ -2,6 +2,7 @@ from collections import namedtuple
 
 DEFAULT_GROUP_NAME = "default_group"
 
+# 具名元组（namedtuple） 是元组的子类，既有元组的不可变特性，又可以通过字段名访问元素，使代码更可读。
 
 # 统一输入
 # SparseFeat继承了namedtuple, 通过__new__方法中设置的参数，实现对namedtuple中某些字段的初始化
